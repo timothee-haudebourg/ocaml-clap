@@ -1,3 +1,10 @@
+module Value = struct
+  type t =
+    | Unit
+    | Int of int
+    | String of string
+end
+
 type 'a action =
   | Flag of ('a -> 'a)
   | Int of (int -> 'a -> 'a)
@@ -174,147 +181,154 @@ let app name version authors summary =
   +> arg (id "help" 'h') Help "Prints this message."
   +> arg (id "version" 'V') Version "Prints version information."
 
-let parse_arg str =
+let is_short_arg str =
   let len = String.length str in
-  if str.[0] == '-' && len > 1 then
-    if str.[1] == '-' && len > 2 then
-      Some [{
-          long = Some (String.sub str 2 (len-2));
-          short = None
-        }]
-    else
-      begin
-        let seq = String.to_seq (String.sub str 1 (len-1)) in
-        let fold_id ids id =
-          ids @ [{ long = None; short = Some id }]
-        in
-        let ids = Seq.fold_left fold_id [] seq in
-        Some ids
-      end
-  else
-    None
+  len > 1 && str.[0] == '-' && str.[1] != '-'
 
-let match_id id a =
-  match (a.id.long, a.id.short), (id.long, id.short) with
-  | (Some a, _), (Some b, _) -> a = b
-  | (_, Some a), (_, Some b) -> a = b
-  | _ -> false
+let is_long_arg str =
+  let len = String.length str in
+  len > 2 && str.[0] == '-' && str.[1] == '-'
 
-let rec find_arg_opt id = function
-  | [] -> None
-  | a::_ when match_id id a -> Some a
-  | _::l -> find_arg_opt id l
-
-let anonymous_arg_opt : ('a anonymous) list -> (('a anonymous) list * 'a anonymous) option = function
-  | [] -> None
-  | a::l -> Some (l, a)
-
-let parse_int i =
-  int_of_string Sys.argv.(i)
-
-let parse_string i =
-  Sys.argv.(i)
-
-exception Invalid_value of string * string
+exception Invalid_value of ident * string
+exception Invalid_ano_value of string * string
+exception Value_expected of ident
 exception Unexpected_value of string
 exception Unknown_option of ident
 
-let parse t x =
-  let rec special_flag i =
+let fold_args f g t accu =
+  let expect_param arg i =
     if Array.length Sys.argv <= i then
-      None
+      raise (Value_expected arg.id)
     else
-      match special_flag (i+1) with
-      | Some Help -> Some Help (* --help has priority over --version *)
-      | s ->
-        begin
-          match parse_arg Sys.argv.(i) with
-          | Some ids ->
-            let rec special s = function
-              | [] -> s
-              | id::ids ->
-                begin
-                  match special s ids with
-                  | Some Help -> Some Help
-                  | s ->
-                    if id.long = Some "help" || id.short = Some 'h' then
-                      Some Help
-                    else if id.long = Some "version" || id.short = Some 'V' then
-                      Some Version
-                    else
-                      s
-                end
-            in
-            special s ids
-          | None -> s
-        end
+      Sys.argv.(i)
   in
-  match special_flag 1 with
-  | Some Help ->
-    print_usage t Format.std_formatter;
-    exit 0
-  | Some Version ->
-    Format.fprintf Format.std_formatter "%s\n" t.version;
-    exit 0
-  | _ ->
-    begin
-      try
-        let process arg action i x =
-          try
-            match action with
-            | Flag f ->
-              f x, 0
-            | Int f ->
-              f (parse_int i) x, 1
-            | String f ->
-              f (parse_string i) x, 1
-            | _ -> x, 0
-          with
-          | Invalid_argument msg ->
-            raise (Invalid_value (arg, msg))
-        in
-        let rec read_arg anons i x =
-          if Array.length Sys.argv <= i then x else
-            begin
-              let str = Sys.argv.(i) in
-              match parse_arg str with
-              | Some ids ->
-                let rec process_ids i x = function
-                  | [] -> x, i
-                  | id::ids ->
-                    begin
-                      match find_arg_opt id t.args with
-                      | Some arg ->
-                        let (x, n) = process str arg.action i x in
-                        process_ids (i+n) x ids
-                      | None -> raise (Unknown_option id)
-                    end
-                in
-                let x, i = process_ids (i + List.length ids) x ids in
-                read_arg anons i x
-              | None ->
-                begin
-                  match anonymous_arg_opt anons with
-                  | Some (anons, arg) ->
-                    let (x, n) = process arg.name arg.action i x in
-                    let n = max n 1 in
-                    read_arg anons (i+n) x
-                  | None -> raise (Unexpected_value str)
-                end
+  let rec fold i remaining_anons accu =
+    let rec read_expected_params i (selected_args : 'a arg list) accu =
+      match selected_args with
+      | [] -> fold i remaining_anons accu
+      | arg::selected_args' ->
+        let value, j = begin match arg.action with
+          | Int _ ->
+            let str = expect_param arg i in
+            begin match int_of_string_opt str with
+              | Some value ->
+                Value.Int value, (i + 1)
+              | None -> raise (Invalid_value (arg.id, str))
             end
+          | String _ ->
+            let value = expect_param arg i in
+            Value.String value, (i + 1)
+          | _ ->
+            Value.Unit, i
+        end
         in
-        read_arg t.anons 1 x
-      with
-      | Invalid_value (arg, msg) ->
-        Format.eprintf "Invalid value `%s' for option `%s'\n" msg arg;
-        print_usage t Format.err_formatter;
-        exit 1
-      | Unknown_option id ->
-        Format.eprintf "Unknown option `%t'\n" (print_id id);
-        print_usage t Format.err_formatter;
-        exit 1
-      | Unexpected_value value ->
-        Format.eprintf "Unexpected value `%s'\n" value;
-        print_usage t Format.err_formatter;
-        exit 1
+        read_expected_params j selected_args' (f arg value accu)
+    in
+    if Array.length Sys.argv <= i then accu else begin
+      let str = Sys.argv.(i) in
+      if is_short_arg str then
+        let names = List.of_seq (String.to_seq (String.sub str 1 ((String.length str) - 1))) in
+        let selected_args = List.map (
+            function c ->
+            match List.find_opt (function arg -> arg.id.short = Some c) t.args with
+            | Some arg -> arg
+            | None -> raise (Unknown_option {
+                short = Some c;
+                long = None
+              })
+          ) names
+        in
+        read_expected_params (i + 1) selected_args accu
+      else if is_long_arg str then
+        let name = String.sub str 2 ((String.length str) - 2) in
+        let selected_arg = match List.find_opt (function arg -> arg.id.long = Some name) t.args with
+          | Some arg -> arg
+          | None -> raise (Unknown_option {
+              short = None;
+              long = Some name
+            })
+        in
+        read_expected_params (i + 1) [selected_arg] accu
+      else begin
+        match remaining_anons with
+        | [] -> raise (Unexpected_value str)
+        | arg::remaining_anons' ->
+          let value = match arg.action with
+            | Int _ ->
+              begin match int_of_string_opt str with
+                | Some value ->
+                  Value.Int value
+                | None -> raise (Invalid_ano_value (arg.name, str))
+              end
+            | String _ ->
+              Value.String str
+            | _ -> Value.Unit
+          in
+          let accu = g arg value accu in
+          fold (i + 1) (if arg.multiple then [arg] else remaining_anons') accu
+      end
     end
+  in
+  fold 1 t.anons accu
+
+let parse t accu =
+  try
+    let parsed_args, parsed_anons, special_action = fold_args (
+        fun arg value (args, anons, special_action) ->
+          let special_action = match special_action, arg.action with
+            | None, Version -> Some Version
+            | _, Help -> Some Help
+            | _, _ -> special_action
+          in
+          (arg, value)::args, anons, special_action
+      ) (
+        fun ano value (args, anons, special_action) ->
+          args, (ano, value)::anons, special_action
+      ) t ([], [], None)
+    in
+    begin match special_action with
+      | Some Help ->
+        print_usage t Format.std_formatter;
+        exit 0
+      | Some Version ->
+        Format.fprintf Format.std_formatter "%s\n" t.version;
+        exit 0
+      | _ ->
+        let apply_action action value accu =
+          match action, value with
+          | Flag f, Value.Unit -> f accu
+          | Int f, Value.Int i -> f i accu
+          | String f, Value.String s -> f s accu
+          | _ -> failwith "clap failed."
+        in
+        let accu = List.fold_left (
+            fun accu ((arg : 'a arg), value) ->
+              apply_action arg.action value accu
+          ) accu parsed_args
+        in
+        List.fold_left (
+          fun accu (ano, value) ->
+            apply_action ano.action value accu
+        ) accu parsed_anons
+    end
+  with
+  | Invalid_value (id, str) ->
+    Format.eprintf "Invalid value `%s' for option `%t'\n" str (print_id id);
+    print_usage t Format.err_formatter;
+    exit 1
+  | Invalid_ano_value (name, str) ->
+    Format.eprintf "Invalid value `%s' for `%s'\n" str name;
+    print_usage t Format.err_formatter;
+    exit 1
+  | Value_expected id ->
+    Format.eprintf "Value expected for option `%t'\n" (print_id id);
+    print_usage t Format.err_formatter;
+    exit 1
+  | Unknown_option id ->
+    Format.eprintf "Unknown option `%t'\n" (print_id id);
+    print_usage t Format.err_formatter;
+    exit 1
+  | Unexpected_value value ->
+    Format.eprintf "Unexpected value `%s'\n" value;
+    print_usage t Format.err_formatter;
+    exit 1
