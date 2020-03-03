@@ -1,1 +1,0 @@
-(library (name Clap) (public_name clap))
