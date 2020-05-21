@@ -96,6 +96,11 @@ install: $(TARGET) $(LIB).cmi
 	@cp $(LIB).cmx $(LIB).cmxa $(LIB).cmxs $(LIB).a $(PREFIX)/lib/$(PACKAGE)/
 	@echo "done."
 
+uninstall:
+	@echo "installing from $(PREFIX)/lib/$(PACKAGE)/"
+	@rm -rf $(PREFIX)/lib/$(PACKAGE)
+	@echo "done."
+
 # Clean the repo.
 clean:
 	rm -rf $(CMO) $(CMI) $(CMX) $(OBJ) $(CMTI) $(LIB).o $(LIB).cmo $(DEP)
